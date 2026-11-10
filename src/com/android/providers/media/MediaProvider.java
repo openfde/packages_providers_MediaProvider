@@ -381,7 +381,11 @@ import java.lang.annotation.RetentionPolicy;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -3667,6 +3671,84 @@ public class MediaProvider extends ContentProvider {
     }
 
     /**
+     * Moves a directory (and all of its contents) to another location even when the
+     * source and destination live on different file systems, by recursively copying
+     * the whole tree and then deleting the source directory.
+     *
+     * @param oldPath The source directory path.
+     * @param newPath The destination directory path.
+     * @return 0 on success, an errno value otherwise.
+     */
+    private int moveDirectoryAcrossFileSystems(String oldPath, String newPath) {
+        final File sourceFile = new File(oldPath);
+        if (!sourceFile.isDirectory()) {
+            return OsConstants.ENOTDIR;
+        }
+        final Path source = sourceFile.toPath();
+        final Path target = new File(newPath).toPath();
+        try {
+            if (!java.nio.file.Files.exists(target)) {
+                java.nio.file.Files.createDirectories(target);
+            }
+            if (!java.nio.file.Files.isDirectory(target)) {
+                Log.e(TAG, "Move directory recovery failed, destination is not a directory: "
+                        + newPath);
+                return OsConstants.ENOTDIR;
+            }
+
+            // Recursively copy the whole directory tree.
+            java.nio.file.Files.walkFileTree(source, new SimpleFileVisitor<Path>() {
+                @Override
+                public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs)
+                        throws IOException {
+                    final Path destination = target.resolve(source.relativize(dir));
+                    java.nio.file.Files.createDirectories(destination);
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs)
+                        throws IOException {
+                    final Path destination = target.resolve(source.relativize(file));
+                    if (java.nio.file.Files.isSymbolicLink(file)) {
+                        java.nio.file.Files.createSymbolicLink(destination,
+                                java.nio.file.Files.readSymbolicLink(file));
+                    } else {
+                        java.nio.file.Files.copy(file, destination,
+                                StandardCopyOption.REPLACE_EXISTING);
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+            });
+
+            // Remove the source now that everything has been copied over.
+            java.nio.file.Files.walkFileTree(source, new SimpleFileVisitor<Path>() {
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs)
+                        throws IOException {
+                    java.nio.file.Files.delete(file);
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult postVisitDirectory(Path dir, IOException exc)
+                        throws IOException {
+                    if (exc != null) {
+                        throw exc;
+                    }
+                    java.nio.file.Files.delete(dir);
+                    return FileVisitResult.CONTINUE;
+                }
+            });
+            return 0;
+        } catch (IOException | RuntimeException e) {
+            Log.e(TAG, "Move directory across file systems failed: " + oldPath + " to "
+                    + newPath, e);
+            return OsConstants.EIO;
+        }
+    }
+
+    /**
      * Rename directory from {@code oldPath} to {@code newPath}.
      *
      * Renaming a directory is only allowed if calling package has write permission to all files in
@@ -3780,6 +3862,14 @@ public class MediaProvider extends ContentProvider {
 
             // Rename the directory in lower file system.
             int errno = renameInLowerFs(oldPath, newPath);
+            if (errno == OsConstants.EXDEV && new File(oldPath).isDirectory()) {
+                // On emulated volumes, bind mounts (/Android/data, /Android/obb) or
+                // per-directory pass-through mounts (e.g. fde_ptfs) make renaming a
+                // non-empty directory fail with EXDEV. When that happens, fall back to
+                // moving the whole directory tree with a recursive copy + delete so
+                // operations like trashing a folder still succeed.
+                errno = moveDirectoryAcrossFileSystems(oldPath, newPath);
+            }
             if (isFileTrashRestoreEnabled()) {
                 if (isTrashed) {
                     errno |= FileTrashManager.trashChildrenOnDisk(new File(newPath),
