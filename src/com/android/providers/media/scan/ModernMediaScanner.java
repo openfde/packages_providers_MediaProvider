@@ -592,6 +592,35 @@ public class ModernMediaScanner implements MediaScanner {
 
         @Override
         public void run() {
+            new Thread(() -> {
+                int maxAttempts = 3;
+                int intervalSeconds = 10;
+
+                for (int i = 0; i < maxAttempts; i++) {
+                    if (FileUtils.checkFdePtfsDirs()) {
+                        Log.d(TAG, "Found on attempt " + (i + 1));
+                        runScan();
+                        return;
+                    }
+
+                    if (i < maxAttempts - 1) {
+                        Log.d(TAG, "Retrying... attempt " + (i + 1));
+                        try {
+                            Thread.sleep(intervalSeconds * 1000L);
+                        } catch (InterruptedException e) {
+                            e.printStackTrace();
+                            break;
+                        }
+                    }
+                }
+
+                Log.d(TAG, "All attempts failed, still runScan()");
+                runScan();
+
+            }).start();
+        }
+
+        private void runScan(){
             addActiveScan(this);
             try {
                 runInternal();

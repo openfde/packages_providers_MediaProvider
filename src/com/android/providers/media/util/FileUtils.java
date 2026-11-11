@@ -102,6 +102,9 @@ import java.util.function.Consumer;
 import java.util.function.ObjIntConsumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.io.BufferedReader;
+import java.io.FileReader;
+import java.util.List;
 
 public class FileUtils {
     // Even though vfat allows 255 UCS-2 chars, we might eventually write to
@@ -1983,6 +1986,44 @@ public class FileUtils {
     public static File canonicalize(@NonNull File file) throws IOException {
         Objects.requireNonNull(file);
         return file.getCanonicalFile();
+    }
+
+    public static boolean checkFdePtfsDirs() {
+        List<String> targetDirs = Arrays.asList(
+                "Music", "Movies", "Download", "Documents", "Pictures", "Desktop"
+        );
+
+        BufferedReader reader = null;
+        try {
+            reader = new BufferedReader(new FileReader("/proc/mounts"));
+            String line;
+
+            while ((line = reader.readLine()) != null) {
+                if (line.contains("fde_ptfs")) {
+                    String[] parts = line.split(" ");
+                    if (parts.length < 2) continue;
+                    String mountPoint = parts[1];
+
+                    for (String dir : targetDirs) {
+                        if (line.toLowerCase().contains(dir.toLowerCase()) || 
+                            mountPoint.toLowerCase().contains(dir.toLowerCase())) {
+                            System.out.println("Found directory " + dir + " in line: " + line);
+                            return true;
+                        }
+                    }
+                }
+            }
+
+        } catch (IOException e) {
+            e.printStackTrace();
+            return false;
+        } finally {
+            if (reader != null) {
+                try { reader.close(); } catch (IOException ignored) {}
+            }
+        }
+
+        return false;
     }
 
     /**
